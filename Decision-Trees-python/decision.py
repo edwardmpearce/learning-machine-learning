@@ -96,11 +96,6 @@ def unique(seq):
     return list(set(seq))
 
 
-def count(seq):
-    """Count the number of items in seq that are interpreted as true."""
-    return sum(map(bool, seq))
-
-
 def mode(data):
     """Return the most common data item. If there are ties, return any one of them."""
     [(item, count)] = collections.Counter(data).most_common(1)
@@ -153,7 +148,7 @@ class DecisionFork:
         """Initialize a class instance by declaring which attribute this node tests."""
         self.attr = attr
         self.attr_name = attr_name or attr # Defaults to attr (integer index) unless a name is provided
-        self.default_child = default_child # Default child is typically set to the most common attr value
+        self.default_child = default_child # Default child is typically set to predict the most common target value in the examples
         self.branches = branches or {} # Defaults to an empty dictionary unless branches provided
 
     def __call__(self, example):
@@ -165,7 +160,7 @@ class DecisionFork:
         if attr_val in self.branches:
             return self.branches[attr_val](example)
         else:
-            # return default class when attribute is unknown
+            # return default child's prediction when attribute unknown, usually the most common target value among remaining examples
             return self.default_child(example)
 
     def add(self, val, subtree):
@@ -203,55 +198,57 @@ class DecisionLeaf:
         return repr(self.result)
 
 
-def DecisionTreeLearner(dataset):
+def DecisionTreeLearner(dataset, criterion="entropy"):
     """Algorithm for training a decision tree on an input dataset and returning a trained model.
     
     The trained model is a prediction function which takes an input example and returns a predicted target value.
+    
+    Options for criterion are "entropy", "gini" to determine next split attribute by information content, gini impurity, respectively.
     """
 
     target, values = dataset.target, dataset.values
 
     def decision_tree_learning(examples, attrs, parent_examples=()):
-        if len(examples) == 0:
-            return plurality_value(parent_examples)
+        if len(examples) == 0: # If no examples left, return a leaf which predicts the most common class of examples for the parent node
+            return most_common_class(parent_examples)
         if all_same_class(examples):
             return DecisionLeaf(examples[0][target])
-        if len(attrs) == 0:
-            return plurality_value(examples)
+        if len(attrs) == 0: # If no attributes left to test, return leaf predicting most common target class in remaining examples
+            return most_common_class(examples)
+        # Choose the attribute to split on according to our importance measure
         A = choose_attribute(attrs, examples)
-        tree = DecisionFork(A, dataset.attr_names[A], plurality_value(examples))
+        # Create a fork in the tree using the chosen attribute. Default prediction is set to the most common target value in the examples
+        tree = DecisionFork(A, dataset.attr_names[A], most_common_class(examples))
+        # Recursively repeat process after splitting examples according to value of chosen attribute, remembering parent examples
         for (v_k, exs) in split_by(A, examples):
             subtree = decision_tree_learning(exs, remove_all(A, attrs), examples)
             tree.add(v_k, subtree)
         return tree
 
-    def plurality_value(examples):
-        """
-        Return the most popular target value for this set of examples.
-        (If target is binary, this is the majority; otherwise plurality).
-        """
-        popular = argmax_random_tie(values[target], key=lambda v: count(target, v, examples))
+    def most_common_class(examples):
+        """Return the most popular target value for this set of examples as a DecisionLeaf instance"""
+        popular = argmax_random_tie(values[target], function=lambda v: count(target, v, examples))
         return DecisionLeaf(popular)
 
     def count(attr, val, examples):
-        """Count the number of examples that have example[attr] = val."""
+        """Count the number of examples with attr equal to val"""
         return sum(e[attr] == val for e in examples)
 
     def all_same_class(examples):
-        """Are all these examples in the same target class?"""
+        """Tests whether the passed examples are all in the same target class"""
         class0 = examples[0][target]
         return all(e[target] == class0 for e in examples)
 
     def choose_attribute(attrs, examples):
-        """Choose the attribute with the highest information gain."""
-        return argmax_random_tie(attrs, key=lambda a: information_gain(a, examples))
+        """Choose the attribute with the highest mutual information/Gini-gain on splitting."""
+        return argmax_random_tie(attrs, function=lambda a: gain(a, examples))
 
-    def information_gain(attr, examples):
-        """Return the expected reduction in entropy from splitting by attr."""
-
+    def gain(attr, examples):
+        """Return the expected reduction in the entropy/Gini impurity from splitting by attr."""
+        info_measure = {"entropy": information_content, "gini": gini_impurity}
         def I(examples):
-            return information_content([count(target, v, examples) for v in values[target]])
-
+            return info_measure[criterion]([count(target, v, examples) for v in values[target]])
+        
         n = len(examples)
         remainder = sum((len(examples_i) / n) * I(examples_i) for (v, examples_i) in split_by(attr, examples))
         return I(examples) - remainder
@@ -264,9 +261,18 @@ def DecisionTreeLearner(dataset):
 
 
 def information_content(values):
-    """Number of bits to represent the probability distribution in values."""
+    """Calculates entropy measured in bits to represent the distribution of classes in a dataset based on counts values."""
     probabilities = normalize(remove_all(0, values))
     return sum(-p * np.log2(p) for p in probabilities)
+
+
+def gini_impurity(values):
+    """Calculates the Gini impurity of a dataset based on counts values.
+    
+    The Gini impurity is the probability of incorrectly classifying a randomly chosen element in the dataset 
+    if it were randomly labeled according to the class distribution in the dataset"""
+    probabilities = normalize(remove_all(0, values))
+    return 1 - sum(p**2 for p in probabilities)
 
 
 def normalize(dist):
@@ -314,7 +320,7 @@ def weighted_sample_with_replacement(n, seq, weights):
     return [sample() for _ in range(n)]
 
 
-def RandomForest(dataset, n=5):
+def RandomForest(dataset, n=5, criterion="entropy"):
     """An ensemble of n Decision Trees trained using data bagging and feature bagging.
     
     We train each decision tree using a subset of the total examples sampled randomly with replacement, so repetitions allowed,
@@ -344,7 +350,7 @@ def RandomForest(dataset, n=5):
     # Construct the randomly selected forest of individual decision trees
     predictors = [DecisionTreeLearner(DataSet(examples=data_bagging(dataset), attrs=dataset.attrs,
                                               attr_names=dataset.attr_names, target=dataset.target,
-                                              inputs=feature_bagging(dataset))) for _ in range(n)]   
+                                              inputs=feature_bagging(dataset)), criterion=criterion) for _ in range(n)]   
     
     def predict(example):
         """Given an input example, the predicted target value of the random forest model is the most common
